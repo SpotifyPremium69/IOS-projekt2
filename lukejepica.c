@@ -28,9 +28,11 @@
 
 // Semafory
 sem_t mutex;        // Synchronizace výstupu
-sem_t bus_arrived;  // Notifikace příjezdu autobusu
-sem_t bus_departed; // Notifikace odjezdu autobusu
-sem_t boardingS;
+sem_t *capac;
+sem_t *leaving_bus;  // Notifikace příjezdu autobusu
+sem_t *bus_finish; // Notifikace odjezdu autobusu
+sem_t *boardingS;
+sem_t *station_number[10];
 
 int sem_id; // ID semaforu
 int shm_id; // ID sdílené paměti
@@ -40,6 +42,7 @@ typedef struct
 {
     // Zde můžete definovat sdílené proměnné potřebné pro synchronizaci
     int skiers_waiting[MAX_STATIONS]; // Počet lyžařů čekajících na každé zastávce
+    int skiers_station[MAX_STATIONS];
     int skiers_boarded;               // Počet lyžařů, kteří už nastoupili do autobusu
     int current_station;
     int event_number;
@@ -53,20 +56,65 @@ void initialize_semaphore()
         perror("sem_init");
         exit(1);
     }
-    if (sem_init(&bus_arrived, 1, 1) == -1)
+    
+    capac = sem_open("/capac", O_CREAT | O_EXCL, 0644, 0);
+    if (capac == SEM_FAILED)
     {
-        perror("sem_init");
-        exit(1);
+        capac = sem_open("/capac", 0);
+        if (capac == SEM_FAILED)
+        {
+            perror("Chyba při otevírání semaforu capac");
+            exit(1);
+        }
     }
-    if (sem_init(&bus_departed, 0, 1) == -1)
+
+    leaving_bus = sem_open("/leaving_bus", O_CREAT | O_EXCL, 0644, 0);
+    if (leaving_bus == SEM_FAILED)
     {
-        perror("sem_init");
-        exit(1);
+        leaving_bus = sem_open("/leaving_bus", 0);
+        if (leaving_bus == SEM_FAILED)
+        {
+            perror("Chyba při otevírání semaforu leaving_bus");
+            exit(1);
+        }
     }
-    if (sem_init(&boardingS, 0, 1) == -1)
+    
+    bus_finish = sem_open("/bus_finish", O_CREAT | O_EXCL, 0644, 0);
+    if (boardingS == SEM_FAILED)
     {
-        perror("sem_init");
-        exit(1);
+        bus_finish = sem_open("/bus_finish", 0);
+        if (bus_finish == SEM_FAILED)
+        {
+            perror("Chyba při otevírání semaforu bus_finish");
+            exit(1);
+        }
+    }
+    
+    boardingS = sem_open("/boardingS", O_CREAT | O_EXCL, 0644, 0);
+    if (boardingS == SEM_FAILED)
+    {
+        boardingS = sem_open("/boardingS", 0);
+        if (boardingS == SEM_FAILED)
+        {
+            perror("Chyba při otevírání semaforu boardingS");
+            exit(1);
+        }
+    }
+
+    for (int i = 0; i < 10; i++){
+        char sem_name[20];
+        sprintf(sem_name, "/station%d_sem", i + 1);
+
+        station_number[i] = sem_open(sem_name, O_CREAT | O_EXCL, 0644, 0);
+
+        if(station_number[i] == SEM_FAILED){
+            station_number[i] = sem_open(sem_name, 0);
+            if (station_number[i]  == SEM_FAILED)
+            {
+                perror("Chyba při otevírání semaforu station_number");
+                exit(1);
+            }
+        }
     }
 }
 
@@ -103,7 +151,7 @@ shared_memory *createSharedMemory()
     return sharedMemory;
 }
 
-void bus_process(int stations, int capacity, int max_bus_ride_time, shared_memory *shared_mem)
+void bus_process(int stations, int max_bus_ride_time, shared_memory *shared_mem)
 {
     sem_wait(&mutex);
     printf("%d: BUS: started\n", shared_mem->event_number);
@@ -113,41 +161,23 @@ void bus_process(int stations, int capacity, int max_bus_ride_time, shared_memor
 
     while (idZ <= stations)
     {
-        int value;
-        bool pickup;
-        if (sem_getvalue(&bus_arrived, &value) > 0)
-        {
-            sem_post(&bus_arrived);
-        }
-        sem_wait(&boardingS);
         // Čekání na příjezd autobusu na zastávku
         usleep(rand() % max_bus_ride_time); // Čekání na náhodný čas dojezdu na další zastávku
         sem_wait(&mutex);
-        printf("%d: BUS: arrived to: %d\n", shared_mem->event_number, idZ);
+        printf("%d: BUS: arrived to %d\n", shared_mem->event_number, idZ);
+        sem_post(station_number[idZ-1]);
+        
         shared_mem->event_number++;
         shared_mem->current_station = idZ;
-
-        if (shared_mem->skiers_waiting[idZ] != 0)
-        {
-            pickup = true;
-        }
         sem_post(&mutex);
-        sem_post(&boardingS);
-        sem_post(&bus_arrived);
-
-        if (pickup == true)
-        {
-            sem_wait(&bus_departed);
-        }
         sem_wait(&mutex);
-        if (capacity == 0)
-        {
-            printf("%d: BUS: leaving\n", shared_mem->event_number);
-            shared_mem->event_number++;
+
+        if(shared_mem->skiers_waiting[idZ] != 0){
+            sem_wait(boardingS);
         }
-        sem_wait(&bus_arrived);
-        printf("%d: BUS: leaving\n", shared_mem->event_number);
+        printf("%d: BUS: leaving %d\n", shared_mem->event_number, idZ);
         shared_mem->event_number++;
+
         sem_post(&mutex);
         // Nechá nastoupit všechny čekající lyžaře do kapacity autobusu
 
@@ -160,6 +190,8 @@ void bus_process(int stations, int capacity, int max_bus_ride_time, shared_memor
         {
             printf("%d: BUS: arrived to final\n", shared_mem->event_number);
             shared_mem->event_number++;
+            sem_post(bus_finish);
+            sem_wait(leaving_bus);
             usleep(rand() % max_bus_ride_time); // Čekání na náhodný čas
             printf("%d: BUS: leaving final\n", shared_mem->event_number);
             shared_mem->event_number++;
@@ -176,8 +208,6 @@ void bus_process(int stations, int capacity, int max_bus_ride_time, shared_memor
 void skier_process(int idL, int idZ, int max_waiting_time, shared_memory *shared_mem)
 {
     // Spuštění lyžaře
-    // int semStatus;
-    // bool boarded = false;
     sem_wait(&mutex);
     printf("%d: L%d: started\n", shared_mem->event_number, idL);
     shared_mem->event_number++;
@@ -187,49 +217,43 @@ void skier_process(int idL, int idZ, int max_waiting_time, shared_memory *shared
     // Jde na přidělenou zastávku idZ.
     sem_wait(&mutex);
     shared_mem->skiers_waiting[idZ]++;
-    sem_post(&mutex);
-    // Čekání na odjezd autobusu
-    sem_wait(&mutex);
+    
+    
     printf("%d: L%d: arrived to %d\n", shared_mem->event_number, idL, idZ);
     shared_mem->event_number++;
     // Po příjezdu skibusu nastoupí (pokud je volná kapacita)
     sem_post(&mutex);
-    /*
-    while (boarded == false)
-    {
-        sem_wait(&boardingS);
-        sem_wait(&mutex);
-        if (shared_mem->current_station == idZ)
-        {
-            sem_getvalue(&bus_departed, &semStatus);
-            if (semStatus > 0)
-            {
-                sem_wait(&bus_departed);
-            }
+
+    sem_wait(station_number[idZ-1]);
+    sem_wait(&mutex);
+    if(idZ == shared_mem->current_station){
+        if(shared_mem->skiers_waiting[idZ] > 0){
+            printf("%d: L%d: boarding\n", shared_mem->event_number, idL);
+            shared_mem->event_number++;
             shared_mem->skiers_boarded++;
             shared_mem->skiers_waiting[idZ]--;
-            boarded = true;
-            if (shared_mem->skiers_waiting[idZ] == 0)
-            {
-                sem_post(&bus_departed);
-            }
+            sem_post(station_number[idZ-1]);
         }
-        sem_post(&mutex);
-        sem_post(&boardingS);
+        if(shared_mem->skiers_waiting[idZ] == 0){
+            sem_post(station_number[idZ-1]);
+            sem_post(boardingS);
+        }
     }
-    */
-    sem_wait(&mutex);
-    printf("%d: L%d: boarding\n", shared_mem->event_number, idL);
-    shared_mem->event_number++;
     sem_post(&mutex);
 
-    // Vyčká na příjezd skibusu k lanovce.
+    sem_wait(bus_finish);
     sem_wait(&mutex);
-    shared_mem->skiers_boarded--;
-    printf("%d: L%d: going to ski\n", shared_mem->event_number, idL);
-    shared_mem->event_number++;
+    if(shared_mem->skiers_boarded > 0){
+        printf("%d: L%d: going to ski\n", shared_mem->event_number, idL);
+        shared_mem->event_number++;
+        shared_mem->skiers_boarded--;
+        sem_post(bus_finish);
+    }
+    if(shared_mem->skiers_boarded == 0){
+        sem_post(bus_finish);
+        sem_post(leaving_bus);
+    }
     sem_post(&mutex);
-    // Proces lyžaře končí
 }
 
 int main(int argc, char *argv[])
@@ -252,7 +276,7 @@ int main(int argc, char *argv[])
 
     initialize_semaphore();
     shared_memory *shared_mem = createSharedMemory();
-
+    
     // Spuštění procesu autobusu
     pid_t bus_pid = fork();
     if (bus_pid == -1)
@@ -262,8 +286,8 @@ int main(int argc, char *argv[])
     }
     else if (bus_pid == 0)
     {
-
-        bus_process(Z, K, TB, shared_mem);
+        
+        bus_process(Z, TB, shared_mem);
         exit(0);
     }
 
@@ -282,7 +306,7 @@ int main(int argc, char *argv[])
         else if (skier_pid == 0)
         {
             // Proces lyžaře
-            srand(time(NULL) * getpid());
+            
             skier_process(i, random_station, TL, shared_mem);
             exit(0);
         }
@@ -304,14 +328,12 @@ int main(int argc, char *argv[])
             exit(1);
         }
     }
-
     // Odstranění semaforu
-
-    // Odstranění sdílené paměti
-    if (shmctl(shm_id, IPC_RMID, NULL) == -1)
-    {
-        perror("shmctl");
+    for(int i = 0; i < 10; i++){
+        sem_close(station_number[i]);
     }
-
+    sem_close(boardingS);
+    // Odstranění sdílené paměti
+    
     return 0;
 }
